@@ -1223,7 +1223,7 @@ elif mode == 'Advanced Analysis' and selected_step == 'Cell-level Manipulation':
         
         adata = st.session_state.adata.copy()
 
-        task = st.selectbox('Choose a task:', ['Label clusters', 'Subset and filter', 'Subset cells based on gene expressions', 'Re-analyze clusters'])
+        task = st.selectbox('Choose a task:', ['Label clusters', 'Subset and filter', 'Subset and filter cells based on gene expressions', 'Re-analyze clusters'])
 
         # label clusters
         # check if clusters are in .obs
@@ -1277,6 +1277,9 @@ elif mode == 'Advanced Analysis' and selected_step == 'Cell-level Manipulation':
             subset = st.selectbox('Subset by:', obs_col)
 
             selected_values = None
+            operator = None
+            threshold = None
+
             subset_series = adata.obs[subset]
             col_dtype = subset_series.dtype
 
@@ -1297,11 +1300,15 @@ elif mode == 'Advanced Analysis' and selected_step == 'Cell-level Manipulation':
                 with col3:
                     st.write(f"Range: {np.nanmin(subset_series):.2f} to {np.nanmax(subset_series):.2f}")
 
-            # Apply filter
+            # Prepare name input BEFORE button press, so it survives rerun
+            st.markdown("### Save this subset")
+            subset_name = st.text_input("Name this subset:", value=f"{subset}_filtered")
+
             if st.button('Subset'):
                 subset_adata = None
 
-                if pd.api.types.is_numeric_dtype(col_dtype):
+                # Numeric filtering
+                if pd.api.types.is_numeric_dtype(col_dtype) and operator is not None:
                     if operator == '=':
                         mask = subset_series == threshold
                     elif operator == '>':
@@ -1312,8 +1319,14 @@ elif mode == 'Advanced Analysis' and selected_step == 'Cell-level Manipulation':
                         mask = subset_series >= threshold
                     elif operator == '<=':
                         mask = subset_series <= threshold
-                    subset_adata = adata[mask].copy()
+                    else:
+                        st.warning("Invalid operator.")
+                        mask = None
 
+                    if mask is not None:
+                        subset_adata = adata[mask].copy()
+
+                # Categorical or boolean filtering
                 elif selected_values:
                     mask = subset_series.isin(selected_values)
                     subset_adata = adata[mask].copy()
@@ -1327,114 +1340,107 @@ elif mode == 'Advanced Analysis' and selected_step == 'Cell-level Manipulation':
                         df[col] = df[col].astype(str)
                     st.dataframe(df.head(20))
 
-                    # Subset naming + save
-                    st.markdown("### Save this subset")
+                    # Save subset to session state
                     if 'saved_subsets' not in st.session_state:
                         st.session_state['saved_subsets'] = {}
 
-                    subset_name = st.text_input("Name this subset:", value=f"{subset}_filtered")
-                    if st.button("Save subset"):
-                        if subset_name.strip() != "":
-                            st.session_state['saved_subsets'][subset_name] = subset_adata
-                            st.success(f"Subset saved as `{subset_name}`.")
-                        else:
-                            st.warning("Please enter a valid name.")
+                    if subset_name.strip() != "":
+                        st.session_state['saved_subsets'][subset_name] = subset_adata
+                        st.success(f"Subset saved as `{subset_name}`.")
+                    else:
+                        st.warning("Please enter a valid subset name.")
                 else:
                     st.warning("No subsetting applied. Please check your selections.")
 
 
-        elif task == 'Subset cells based on gene expressions':
-            # get expression data
+
+        elif task == 'Subset and filter cells based on gene expressions':
             genes = adata.var_names.tolist()
 
-            gene_input = st.text_input('Enter gene names: (e.g. Ebf2, Gata6, Sox9)', '')
+            gene_input = st.multiselect('Select gene names:', genes)
 
             if gene_input:
-                genes = [gene.strip() for gene in gene_input.split(',')]
-                available_genes = [gene for gene in genes if gene in adata.var_names]
-                unavailable_genes = [gene for gene in genes if gene not in adata.var_names]
+                # genes = [gene.strip() for gene in gene_input.split(',')]
+                # available_genes = [gene for gene in genes if gene in adata.var_names]
+                # unavailable_genes = [gene for gene in genes if gene not in adata.var_names]
 
-                if unavailable_genes:
-                    st.warning(f"The following genes were not found and will be ignored: {', '.join(unavailable_genes)}")
+                # if unavailable_genes:
+                #     st.warning(f"The following genes were not found and will be ignored: {', '.join(unavailable_genes)}")
 
-                if available_genes:
-                    st.markdown("### Expression Filters for Selected Genes")
-                    gene_filters = {}
+                # if available_genes:
+                #     st.markdown("### Expression Filters for Selected Genes")
+                #     gene_filters = {}
+                gene_filters = {}
+                for gene in gene_input:
+                    gene_expr = adata[:, gene].X
+                    gene_expr = gene_expr.toarray().flatten() if hasattr(gene_expr, "toarray") else np.array(gene_expr).flatten()
 
-                    for gene in available_genes:
-                        gene_expr = adata[:, gene].X
+                    min_val = float(np.min(gene_expr))
+                    max_val = float(np.max(gene_expr))
 
-                        # Ensure it's dense
-                        if hasattr(gene_expr, "toarray"):
-                            gene_expr = gene_expr.toarray().flatten()
+                    col1, col2 = st.columns([1, 2])
+                    with col1:
+                        operator = st.selectbox(
+                            f"Operator for {gene}",
+                            ['>', '>=', '<', '<=', '='],
+                            key=f"{gene}_op"
+                        )
+                    with col2:
+                        value = st.number_input(
+                            f"Expression threshold for {gene}",
+                            min_value=min_val,
+                            max_value=max_val,
+                            value=0.0,
+                            key=f"{gene}_val"
+                        )
+
+                    gene_filters[gene] = (operator, value)
+
+                # Persist this above the button to survive rerun
+                subset_name = st.text_input("Name your subset:", value="_filtered_by_expression")
+
+                if st.button('Subset'):
+                    if not subset_name.strip():
+                        st.warning("Please enter a subset name.")
+                    else:
+                        mask = np.ones(adata.n_obs, dtype=bool)
+
+                        for gene, (op, threshold) in gene_filters.items():
+                            gene_expr = adata[:, gene].X
+                            gene_expr = gene_expr.toarray().flatten() if hasattr(gene_expr, "toarray") else np.array(gene_expr).flatten()
+
+                            # Apply the operator
+                            if op == '>':
+                                gene_mask = gene_expr > threshold
+                            elif op == '>=':
+                                gene_mask = gene_expr >= threshold
+                            elif op == '<':
+                                gene_mask = gene_expr < threshold
+                            elif op == '<=':
+                                gene_mask = gene_expr <= threshold
+                            elif op == '=':
+                                gene_mask = gene_expr == threshold
+                            else:
+                                raise ValueError(f"Unsupported operator: {op}")
+
+                            mask &= gene_mask
+
+                        subset_adata = adata[mask].copy()
+
+                        if subset_adata.n_obs == 0:
+                            st.warning("No cells matched the given expression criteria.")
                         else:
-                            gene_expr = np.array(gene_expr).flatten()
+                            # Preview
+                            st.success(f"Subset applied. {subset_adata.n_obs} cells retained.")
+                            st.dataframe(subset_adata.obs.head(20))
 
-                        min_val = float(np.min(gene_expr))
-                        max_val = float(np.max(gene_expr))
+                            # Save subset
+                            if 'saved_subsets' not in st.session_state:
+                                st.session_state['saved_subsets'] = {}
 
-                        col1, col2 = st.columns([1, 2])
-                        with col1:
-                            operator = st.selectbox(
-                                f"Operator for {gene}",
-                                ['>', '>=', '<', '<=', '='],
-                                key=f"{gene}_op"
-                            )
-                        with col2:
-                            value = st.number_input(
-                                f"Expression threshold for {gene}",
-                                min_value=min_val,
-                                max_value=max_val,
-                                value=0.0,
-                                key=f"{gene}_val"
-                            )
+                            st.session_state['saved_subsets'][subset_name] = subset_adata
+                            st.success(f"Subset saved as `{subset_name}`.")
 
-                        gene_filters[gene] = (operator, value)
-
-                    subset_name = st.text_input("Name your subset:")
-
-                    if st.button('Subset'):
-                        
-                        if not subset_name:
-                            st.warning("Please enter a subset name.")
-                        else:
-                            mask = np.ones(adata.n_obs, dtype=bool)
-
-                            for gene, (op, threshold) in gene_filters.items():
-                                gene_expr = adata[:, gene].X
-
-                                # Convert sparse to dense if necessary
-                                if hasattr(gene_expr, "toarray"):
-                                    gene_expr = gene_expr.toarray().flatten()
-                                else:
-                                    gene_expr = np.array(gene_expr).flatten()
-
-                                # Apply operator
-                                if op == '>':
-                                    gene_mask = gene_expr > threshold
-                                elif op == '>=':
-                                    gene_mask = gene_expr >= threshold
-                                elif op == '<':
-                                    gene_mask = gene_expr < threshold
-                                elif op == '<=':
-                                    gene_mask = gene_expr <= threshold
-                                elif op == '=':
-                                    gene_mask = gene_expr == threshold
-                                else:
-                                    raise ValueError(f"Unsupported operator: {op}")
-
-                                mask &= gene_mask
-
-                            # Save to obs
-                            adata.obs[subset_name] = pd.Categorical(mask, categories=[True, False])
-                            st.session_state.adata = adata
-                            st.success(f"Subset '{subset_name}' added to `adata.obs`!")
-
-                            # view .obs
-                            df = adata.obs.head(20).copy()
-                            for col in df.select_dtypes(include=bool).columns:
-                                df[col] = df[col].astype(str)
-                            st.dataframe(df)
                             
 
         elif task == 'Re-analyze clusters':            
@@ -1553,135 +1559,287 @@ elif mode == 'Advanced Analysis' and selected_step == 'Gene-level Manipulation':
         
         st.markdown("""
         <div class="info-box">
-        <strong>What we're doing:</strong> Cell-level manipulation allows you to label, cluster, and so on on a cell-level.
+        <strong>What we're doing:</strong> Gene-level manipulation allows you to run differential gene expression and co-expression analyses.
         </div>
         """, unsafe_allow_html=True)
         
         adata = st.session_state.adata.copy()
 
-        task = st.selectbox('Choose a task:', ['Subset and filter', 'Differential gene expression analysis', 'Co-expression analysis'])
+        task = st.selectbox('Choose a task:', ['Differential gene expression analysis', 'Co-expression analysis'])
 
-        if task == 'Subset and filter':
-            var_col = adata.var.columns.tolist()
-            subset = st.selectbox('Subset by:', var_col)
+        # subset and filter based on columns in .var
+        # if task == 'Subset and filter':
+        #     var_col = adata.var.columns.tolist()
+        #     subset = st.selectbox('Subset by:', var_col)
 
-            selected_values = None
-            subset_series = adata.var[subset]
-            col_dtype = subset_series.dtype
+        #     selected_values = None
+        #     subset_series = adata.var[subset]
+        #     col_type = subset_series.dtype
+        #     st.write(f"Selected column `{subset}` dtype: {col_type}")
 
-            if pd.api.types.is_bool_dtype(col_dtype) or pd.api.types.is_categorical_dtype(col_dtype) or not pd.api.types.is_numeric_dtype(col_dtype):
-                unique_values = subset_series.unique().tolist()
-                selected_values = st.multiselect(f"Select `{subset}` values to keep:", unique_values)
+        #     if pd.api.types.is_bool_dtype(col_type) or pd.api.types.is_categorical_dtype(col_type) or not pd.api.types.is_numeric_dtype(col_type):
+        #         unique_values = subset_series.unique().tolist()
+        #         selected_values = st.multiselect(f'Select  `{subset}` values to keep:', unique_values)
 
-            elif pd.api.types.is_numeric_dtype(col_dtype):
-                col1, col2, col3 = st.columns([1, 1, 2])
-                with col1:
-                    operator = st.selectbox('Operator:', ['=', '>', '<', '>=', '<='])
-                with col2:
-                    try:
-                        default_val = float(np.nanmedian(subset_series))
-                    except Exception:
-                        default_val = 0.0
-                    threshold = st.number_input('Value:', value=default_val)
-                with col3:
-                    st.write(f"Range: {np.nanmin(subset_series):.2f} to {np.nanmax(subset_series):.2f}")
+        #     elif pd.api.types.is_numeric_dtype(col_type):
+        #         col1, col2, col3 = st.columns([1,1,2])
+        #         with col1:
+        #             operator = st.selectbox('Operator:', ['=', '>', '<', '<=', '>='])
+                
+        #         with col2:
+        #             try:
+        #                 default_val = float(np.nanmedian(subset_series))
+        #             except Exception:
+        #                 default_val = 0.0
+        #             threshold = st.number_input('Value:', value=default_val)
+                
+        #         with col3:
+        #             st.write(f"Range: {np.nanmin(subset_series):.2f} to {np.nanmax(subset_series):.2f}")
 
-            # Apply filter
-            if st.button('Subset'):
-                subset_adata = None
+        #     # apply filter
+        #     if st.button('Subset'):
+        #         subset_adata = None
 
-                if pd.api.types.is_numeric_dtype(col_dtype):
-                    if operator == '=':
-                        mask = subset_series == threshold
-                    elif operator == '>':
-                        mask = subset_series > threshold
-                    elif operator == '<':
-                        mask = subset_series < threshold
-                    elif operator == '>=':
-                        mask = subset_series >= threshold
-                    elif operator == '<=':
-                        mask = subset_series <= threshold
-                    subset_adata = adata[mask].copy()
+        #         if pd.api.types.is_numeric_dtype(col_type):
+        #             try:
+        #                 if operator == '=':
+        #                     mask = subset_series == threshold
+        #                 elif operator == '>':
+        #                     mask = subset_series > threshold
+        #                 elif operator == '<':
+        #                     mask = subset_series < threshold
+        #                 elif operator == '>=':
+        #                     mask = subset_series >= threshold
+        #                 elif operator == '<=':
+        #                     mask = subset_series <= threshold
+        #                 else:
+        #                     st.warning("Invalid operator selected.")
+        #                     mask = None
 
-                elif selected_values:
-                    mask = subset_series.isin(selected_values)
-                    subset_adata = adata[mask].copy()
+        #                 if mask is not None:
+        #                     subset_adata = adata[:, mask].copy()
+        #             except NameError:
+        #                 st.warning("Numeric filter not fully defined. Please select operator and value.")
 
-                if subset_adata is not None:
-                    st.success(f"Subset applied. {subset_adata.n_obs} cells retained. {subset_adata.n_vars} genes retained.")
+        #         elif selected_values:
+        #             mask = subset_series.isin(selected_values)
+        #             subset_adata = adata[:, mask].copy()
 
-                    # Show preview
-                    df = subset_adata.obs[[subset]].copy()
-                    for col in df.select_dtypes(include=bool).columns:
-                        df[col] = df[col].astype(str)
-                    st.dataframe(df.head(20))
+        #         else:
+        #             st.warning("No subsetting applied. Please check your selections.")
 
-                    # Subset naming + save
-                    st.markdown("### Save this subset")
-                    if 'saved_subsets' not in st.session_state:
-                        st.session_state['saved_subsets'] = {}
+        #         if subset_adata is not None:
+        #             st.success(f'Subset applied. {subset_adata.n_obs} cells retained. {subset_adata.n_vars} genes retained.')
 
-                    subset_name = st.text_input("Name this subset:", value=f"{subset}_filtered")
-                    if st.button("Save subset"):
-                        if subset_name.strip() != "":
-                            st.session_state['saved_subsets'][subset_name] = subset_adata
-                            st.success(f"Subset saved as `{subset_name}`.")
-                        else:
-                            st.warning("Please enter a valid name.")
-                else:
-                    st.warning("No subsetting applied. Please check your selections.")
-        
-        elif task == 'Differential gene expression analysis':
+        #             # show data preview
+        #             df = subset_adata.var[[subset]].copy()
+        #             for col in df.select_dtypes(include=bool).columns:
+        #                 df[col] = df[col].astype(str)
+        #             st.dataframe(df.head(20))
+
+        #             # name the subset + save
+        #             st.markdown('### Save this subset')
+        #             if 'saved_subsets' not in st.session_state:
+        #                 st.session_state['saved_subsets'] = {}
+        #             subset_name = st.text_input('Name this subset:', value=f'{subset}_filtered')
+
+        #             if st.button('Save subset'):
+        #                 if subset_name.strip() != '':
+        #                     st.session_state['saved_subsets'][subset_name] = subset_adata
+        #                     st.success(f'Subset saved as `{subset_name}`.')
+        #                 else:
+        #                     st.warning('Please enter a valid name.')
+        #             else:
+        #                 st.warning("No subsetting applied. Please check your selections.")
+
+        if task == 'Differential gene expression analysis':
             groupby = st.selectbox("Group by (`.obs` column):", adata.obs.select_dtypes(['category', 'object']).columns)
 
             group_vals = adata.obs[groupby].cat.categories.tolist()
 
-            target_group = st.multiselect("Target group:", ['All'] + group_vals, default=['All'])
-            reference_group = st.multiselect("Reference group:", ['All'] + group_vals, default=['All'])
-
+            reference_group = st.selectbox("Reference group:", ['Rest'] + group_vals)
+            # if ref = 'rest', then groups = 'all'
+            if reference_group == 'Rest':
+                target_group = st.multiselect("Target group:", ['All'])
+            else: 
+                target_group = st.multiselect("Target group:", ['All'] + group_vals, default=['All'])
+            
+            n_genes = st.number_input('Select number of genes to show:', min_value=None, max_value=None, value=0)
             method = st.selectbox("Test method:", ["t-test", "wilcoxon", "logreg", "t-test_overestim_var"])
+            comparison_name = st.text_input("Name this comparison:", value=f'')
 
             if st.button("Run Differential Expression"):
-                # Validate group selections
-                use_all_targets = target_group == ['All']
-                use_all_refs = reference_group == ['All']
+                with st.spinner('Identifying DEGs...'):
+                    #Ensure groupby column is categorical
+                    adata.obs[groupby] = adata.obs[groupby].astype('category')
+                    group_values = adata.obs[groupby].cat.categories.tolist()
 
-                if not use_all_targets and use_all_refs:
-                    # Compare selected target groups against all others
-                    groups = target_group
-                    reference = None
+                    # Show available group names (debugging help)
+                    # st.write("Available groups:", group_values)
 
-                elif use_all_targets and not use_all_refs:
-                    # Compare all groups against selected reference
-                    groups = None
-                    reference = reference_group[0]  # must be a single group
+                    # Validate reference group
+                    if reference_group != 'Rest' and reference_group not in group_values:
+                        st.error(f"Reference group `{reference_group}` not found in `{groupby}` column.")
+                    elif target_group != 'All' and target_group not in group_values:
+                        st.error(f"Target group `{target_group}` not found in `{groupby}` column.")
+                    else:
+                        if reference_group == 'Rest':
+                            sc.tl.rank_genes_groups(
+                                adata,
+                                groupby = groupby,
+                                use_raw = False,
+                                reference = 'rest',
+                                method = method,
+                                key_added = comparison_name
+                            )
+                        elif reference_group != 'Rest' and target_group != 'All':
+                            sc.tl.rank_genes_groups(
+                                adata, 
+                                groupby = groupby,
+                                use_raw = False,
+                                reference = reference_group,
+                                groups = [target_group],
+                                method = method,
+                                key_added = comparison_name
+                            )
+                        elif reference_group != 'Rest' and target_group == 'All':
+                            sc.tl.rank_genes_groups(
+                                adata, 
+                                groupby = groupby,
+                                use_raw = False,
+                                reference = reference_group,
+                                groups = 'all',
+                                method = method,
+                                key_added = comparison_name
+                            )
 
-                elif not use_all_targets and not use_all_refs:
-                    # Compare selected target group(s) against selected reference (must be 1)
-                    groups = target_group
-                    reference = reference_group[0]  # must be a single group
-
+                        st.session_state.adata = adata
+                        st.success(f"Differential expression run complete!")
+            
+                # show top n_gene results as plot
+                st.subheader(f'Showing top {n_genes} DEGs from {comparison_name}')
+                axes_list = sc.pl.rank_genes_groups(
+                    adata,
+                    n_genes = n_genes,
+                    sharey = False,
+                    key = comparison_name,
+                    show = False,
+                    return_fig = True
+                )
+                # convert to a Figure
+                if isinstance(axes_list, list):
+                    fig = axes_list[0].get_figure()  # use the first Axes
                 else:
-                    # All vs all — full group comparison
-                    groups = None
-                    reference = None
+                    fig = axes_list.get_figure()
+                st.pyplot(fig)
 
-                # Check that reference is valid (if not None)
-                if reference is not None and reference not in group_vals:
-                    st.error(f"Invalid reference group: {reference}")
-                else:
-                    key_added = f"{groupby}_{'_'.join(groups) if groups else 'All'}_vs_{reference or 'All'}"
-                    sc.tl.rank_genes_groups(
-                        adata,
-                        groupby=groupby,
-                        groups=groups,
-                        reference=reference,
-                        method=method,
-                        key_added=key_added
-                    )
-                    st.session_state.adata = adata
-                    st.success(f"Differential expression results stored in `adata.uns['{key_added}']`.")
- 
+                # show degs in table
+                results = adata.uns[comparison_name]
+                groups = results['names'].dtype.names # cluster names
+                # showing top genes
+                top_genes = []
+                for group in groups:
+                    names = results['names'][group]
+                    scores = results['scores'][group]
+                    pvals = results['pvals_adj'][group] if 'pvals_adj' in results else results['pvals'][group]
+
+                    for rank, (gene, score, pval) in enumerate(zip(names, scores, pvals), start=1):
+                        top_genes.append({
+                            'Cluster': group,
+                            'Rank': rank,
+                            'Gene': gene,
+                            'Score': score,
+                            'Adjusted p-value': pval
+                        })
+                # convert to df
+                deg_df = pd.DataFrame(top_genes)
+                # convert to scientific notation
+                deg_df['Adjusted p-value'] = deg_df['Adjusted p-value'].apply(lambda x: f'{x:.2e}')
+
+                st.subheader('DEGs per cluster (table)')
+                st.dataframe(deg_df)
+                
+        elif task == 'Co-expression analysis':
+            gene_list = adata.var_names.tolist()
+
+            analysis_type = st.radio("Analysis type", ["Pairwise correlation", "Gene scatter plot"])
+
+            if analysis_type == "Pairwise correlation":
+                selected_genes = st.multiselect("Select gene names:", gene_list)
+                method = st.radio("Correlation method:", ["pearson", "spearman"])
+
+                if st.button('Run co-expression analysis:'):
+                    # if selected_genes:
+                    #     genes = [gene.strip() for gene in selected_genes.split(',')]
+                    #     available_genes = [gene for gene in genes if gene in adata.var_names]
+                    #     unavailable_genes = [gene for gene in genes if gene not in adata.var_names]
+                        
+                    #     if unavailable_genes:
+                    #         st.warning(f"The following genes were not found and will be ignored: {', '.join(unavailable_genes)}")
+
+                    if len(selected_genes) >= 2:
+                        expr = adata[:, selected_genes].X.toarray() if scipy.sparse.issparse(adata.X) else adata[:, selected_genes].X
+                        df = pd.DataFrame(expr, columns=selected_genes)
+                        corr = df.corr(method=method)
+
+                        st.subheader("Correlation matrix")
+                        st.dataframe(corr.round(2))
+
+                        fig, ax = plt.subplots()
+                        sns.heatmap(corr, annot=True, cmap="vlag", ax=ax)
+                        st.pyplot(fig)
+                    else:
+                        st.warning("Please enter at least two valid genes for correlation.")
+
+            elif analysis_type == "Gene scatter plot":
+                col1, col2 = st.columns(2)
+                with col1:
+                    gene_x = st.selectbox("Gene X", gene_list)
+                with col2:
+                    gene_y = st.selectbox("Gene Y", gene_list)
+
+                if st.button('Run co-expression analysis:'):
+                    x = adata[:, gene_x].X.toarray().flatten() if scipy.sparse.issparse(adata.X) else adata[:, gene_x].X.flatten()
+                    y = adata[:, gene_y].X.toarray().flatten() if scipy.sparse.issparse(adata.X) else adata[:, gene_y].X.flatten()
+
+                    fig, ax = plt.subplots()
+                    ax.scatter(x, y, s=10, alpha=0.4)
+                    ax.set_xlabel(gene_x)
+                    ax.set_ylabel(gene_y)
+                    ax.set_title(f"Expression: {gene_x} vs {gene_y}")
+                    st.pyplot(fig)
+
+
+elif mode == 'Advanced Analysis' and selected_step == 'Visualization':
+    if 'adata' not in st.session_state:
+        st.warning("Please load data first!")
+    else:
+        st.markdown('<h2 class="step-header">Gene-level Manipulation</h2>', unsafe_allow_html=True)
+
+        st.markdown("""
+        <div class="info-box">
+        <strong>What we're doing:</strong> Visualize anything you'd like!
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Collect all available datasets: original + optional saved subsets
+        datasets = {"Original dataset": st.session_state.adata}
+        if 'saved_subsets' in st.session_state and isinstance(st.session_state.saved_subsets, dict):
+            datasets.update(st.session_state.saved_subsets)
+
+        # Let user select which one to visualize
+        selected_key = st.selectbox("Select a dataset to visualize:", list(datasets.keys()))
+
+        # Load the selected dataset
+        adata = datasets[selected_key].copy()
+
+        # You can now proceed to visualization logic with `adata`
+
+
+
+
+
+
             
         
 
