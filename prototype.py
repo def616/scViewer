@@ -10,7 +10,8 @@ from io import StringIO
 import io
 import os
 import tempfile
-import anndata
+import zipfile
+import anndata as ad
 import warnings
 import igraph
 import leidenalg
@@ -1039,16 +1040,33 @@ elif mode == "Standard Pipeline" and selected_step == "Visualization":
                         st.warning("No valid gene names entered.")
                     
         elif viz_type == "Cluster Analysis":
-            st.subheader("Cluster UMAP Visualization")
+            st.subheader("Cluster Visualization")
+
+            # Find clustering keys
             cluster_keys = [col for col in adata.obs.columns if col.startswith("leiden") or col.startswith("louvain")]
-            if not cluster_keys:
-                st.warning("No cluster annotations found.")
+
+            # Ensure projection options are available
+            projection_options = [proj.replace('X_', '') for proj in adata.obsm.keys() if proj.startswith('X_')]
+            if not projection_options:
+                st.warning("No projection found in `adata.obsm` starting with 'X_'.")
             else:
-                cluster_key = st.selectbox("Select clustering key:", cluster_keys)
-                if st.button("Plot Clusters"):
-                    fig, ax = plt.subplots(figsize=(8, 6))
-                    sc.pl.umap(adata, color=cluster_key, ax=ax, frameon=False, show=False)
-                    st.pyplot(fig)
+                projection_type = st.selectbox('Projection type:', projection_options)
+
+                if not cluster_keys:
+                    st.warning("No cluster annotations found.")
+                else:
+                    cluster_key = st.selectbox("Select clustering key:", cluster_keys)
+                    if st.button("Plot Clusters"):
+                        fig, ax = plt.subplots(figsize=(8, 6))
+                        if projection_type.lower() == 'umap':
+                            sc.pl.umap(adata, color=cluster_key, ax=ax, frameon=False, show=False)
+                        elif projection_type.lower() == 'tsne':
+                            sc.pl.tsne(adata, color=cluster_key, ax=ax, frameon=False, show=False)
+                        elif projection_type.lower() == 'pca':
+                            sc.pl.pca(adata, color=cluster_key, ax=ax, frameon=False, show=False)
+                        else:
+                            st.warning(f"No plotting function defined for projection: {projection_type}")
+                        st.pyplot(fig)
 
         elif viz_type == "Quality Metrics":
             st.subheader("QC Metric Visualization")
@@ -1223,11 +1241,14 @@ elif mode == 'Advanced Analysis' and selected_step == 'Cell-level Manipulation':
         
         adata = st.session_state.adata.copy()
 
-        task = st.selectbox('Choose a task:', ['Label clusters', 'Subset and filter', 'Subset and filter cells based on gene expressions', 'Re-analyze clusters'])
+        task = st.selectbox('Choose a task:', ['Label clusters', 'Subset and filter', 'Subset and filter cells (gene expression)', 'Annotate cells (gene expression)', 'Re-analyze clusters'])
 
         # label clusters
         # check if clusters are in .obs
         if task == 'Label clusters':
+
+            st.subheader('Label cluster names')
+
             # Look for clustering columns
             clustering_cols = [col for col in adata.obs.columns if col.startswith("leiden") or col.startswith("louvain")]
             if len(clustering_cols) == 0:
@@ -1273,6 +1294,8 @@ elif mode == 'Advanced Analysis' and selected_step == 'Cell-level Manipulation':
                     
                             
         elif task == 'Subset and filter':
+            st.subheader('Subset and filter cells')
+
             obs_col = adata.obs.columns.tolist()
             subset = st.selectbox('Subset by:', obs_col)
 
@@ -1354,7 +1377,9 @@ elif mode == 'Advanced Analysis' and selected_step == 'Cell-level Manipulation':
 
 
 
-        elif task == 'Subset and filter cells based on gene expressions':
+        elif task == 'Subset and filter cells (gene expression)':
+            st.subheader('Subset and filter cells based on gene expressions')
+
             genes = adata.var_names.tolist()
 
             gene_input = st.multiselect('Select gene names:', genes)
@@ -1441,8 +1466,76 @@ elif mode == 'Advanced Analysis' and selected_step == 'Cell-level Manipulation':
                             st.session_state['saved_subsets'][subset_name] = subset_adata
                             st.success(f"Subset saved as `{subset_name}`.")
 
+        elif task == 'Annotate cells (gene expression)':
+            st.subheader('Annotate cells based on gene expressions')
+
+            genes = adata.var_names.tolist()
+            gene_input = st.multiselect('Select gene names:', genes)
+
+            if gene_input:
+                gene_filters = {}
+                for gene in gene_input:
+                    gene_expr = adata[:, gene].X
+                    gene_expr = gene_expr.toarray().flatten() if hasattr(gene_expr, "toarray") else np.array(gene_expr).flatten()
+
+                    min_val = float(np.min(gene_expr))
+                    max_val = float(np.max(gene_expr))
+
+                    col1, col2 = st.columns([1, 2])
+                    with col1:
+                        operator = st.selectbox(
+                            f"Operator for {gene}",
+                            ['>', '>=', '<', '<=', '='],
+                            key=f"{gene}_op"
+                        )
+                    with col2:
+                        value = st.number_input(
+                            f"Expression threshold for {gene}",
+                            min_value=min_val,
+                            max_value=max_val,
+                            value=0.0,
+                            key=f"{gene}_val"
+                        )
+
+                    gene_filters[gene] = (operator, value)
+
+                annotation_name = st.text_input("Name your annotation:", value="")
+
+                if st.button("Annotate"):
+                    import operator as op
+
+                    ops = {
+                        '>': op.gt,
+                        '>=': op.ge,
+                        '<': op.lt,
+                        '<=': op.le,
+                        '=': op.eq,
+                    }
+
+                    # Start with all cells passing
+                    mask = np.ones(adata.n_obs, dtype=bool)
+
+                    for gene, (operator_str, value) in gene_filters.items():
+                        gene_expr = adata[:, gene].X
+                        gene_expr = gene_expr.toarray().flatten() if hasattr(gene_expr, "toarray") else np.array(gene_expr).flatten()
+
+                        mask &= ops[operator_str](gene_expr, value)
+
+                    adata.obs[annotation_name] = mask
+
+                    st.session_state.adata = adata
+                    st.success(f"Annotation '{annotation_name}' added to `adata.obs`.")
+
+                    # show .obs preview
+                    st.subheader('Cell-level info (.obs)')
+                    df = adata.obs.head(20).copy()
+                    for col in df.select_dtypes(include=bool).columns:
+                        df[col] = df[col].astype(str)
+                    st.dataframe(df)
                             
         elif task == 'Re-analyze clusters':            
+            st.subheader('Re-analyze clusters')
+
             # Get clustering keys (e.g., 'leiden', 'louvain')
             clustering_cols = [col for col in adata.obs.columns if col.startswith("leiden") or col.startswith("louvain")]
             clustering_key = st.selectbox('Choose clustering key:', clustering_cols)
@@ -1451,7 +1544,7 @@ elif mode == 'Advanced Analysis' and selected_step == 'Cell-level Manipulation':
             clusters = adata.obs[clustering_key].unique().tolist()
             selected_clusters = st.multiselect('Choose clusters to re-analyze:', sorted(clusters))
 
-            st.subheader('HVG')
+            st.subheader('Highly variable genes')
             calculate_hvg = st.checkbox('Calculate highly variable genes', value=True)
             use_hvg = st.checkbox("Use only highly variable genes", value=True)
             
@@ -1634,7 +1727,7 @@ elif mode == 'Advanced Analysis' and selected_step == 'Gene-level Manipulation':
         #             df = subset_adata.var[[subset]].copy()
         #             for col in df.select_dtypes(include=bool).columns:
         #                 df[col] = df[col].astype(str)
-        #             st.dataframe(df.head(20))
+        #             st.dataframe(df.fhead(20))
 
         #             # name the subset + save
         #             st.markdown('### Save this subset')
@@ -1821,18 +1914,323 @@ elif mode == 'Advanced Analysis' and selected_step == 'Visualization':
         </div>
         """, unsafe_allow_html=True)
 
-        # Collect all available datasets: original + optional saved subsets
+        # collect all available datasets: original + optional saved subsets
         datasets = {"Original dataset": st.session_state.adata}
         if 'saved_subsets' in st.session_state and isinstance(st.session_state.saved_subsets, dict):
             datasets.update(st.session_state.saved_subsets)
 
-        # Let user select which one to visualize
+        # select which one to visualize
         selected_key = st.selectbox("Select a dataset to visualize:", list(datasets.keys()))
 
-        # Load the selected dataset
+        # load the selected dataset
         adata = datasets[selected_key].copy()
 
-        # You can now proceed to visualization logic with `adata`
+        # viz options
+        viz_type = st.selectbox(
+            "Choose visualization type:",
+            ["Gene expression", "Cluster analysis", 'Cell group annotations', "Quality metrics"]
+        )
+
+        if viz_type == 'Gene expression':
+            st.subheader('Gene expression visualization')
+
+            # select genes
+            gene_list = adata.var_names.tolist()
+            gene_names = st.multiselect('Select gene names:', gene_list)
+
+            if gene_names:
+                plot_type = st.selectbox('Plot type:', ['Scatter plot', 'Violin plot', 'Dot plot', 'Heatmap', 'Matrix plot', 'Stacked violin plot'])
+
+                if plot_type == 'Scatter plot':
+                    projection_type = st.selectbox("Projection type:", ["UMAP", "t-SNE", "PCA"])
+
+                    if st.button('Plot Gene Expression') and projection_type is not None:
+                        n_genes = len(gene_names)
+                        n_cols = min(3, n_genes)
+                        n_rows = (n_genes + n_cols - 1) // n_cols
+                        
+                        fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
+                        axes = axes.flatten() if n_genes > 1 else [axes]
+                        
+                        for i, gene in enumerate(gene_names):
+                            ax = axes[i]
+                            if projection_type == "UMAP" and "X_umap" in adata.obsm:
+                                sc.pl.umap(adata, color=gene, ax=ax, ncols=3, frameon=False, show=False)
+                            elif projection_type == "t-SNE" and "X_tsne" in adata.obsm:
+                                sc.pl.tsne(adata, color=gene, ax=ax, ncols=3, frameon=False, show=False)
+                            elif projection_type == "PCA" and "X_pca" in adata.obsm:
+                                sc.pl.pca(adata, color=gene, ax=ax, ncols=3, frameon=False, show=False)
+
+                            ax.set_title(gene)
+                        
+                        for j in range(i + 1, len(axes)):
+                            fig.delaxes(axes[j])  # remove empty subplots
+
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                elif plot_type == 'Violin plot':
+                        if st.button("Plot Gene Expression"):
+                            n_genes = len(gene_names)
+                            n_cols = min(3, n_genes)
+                            n_rows = (n_genes + n_cols - 1) // n_cols
+                            
+                            fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
+                            axes = axes.flatten() if n_genes > 1 else [axes]
+                            
+                            for i, gene in enumerate(gene_names):
+                                ax = axes[i]
+                                sc.pl.violin(adata, keys=gene, ax=ax, show=False)
+                                ax.set_title(gene)
+                            
+                            for j in range(i + 1, len(axes)):
+                                fig.delaxes(axes[j])  # remove empty subplots
+
+                            plt.tight_layout()
+                            st.pyplot(fig)
+                elif plot_type == 'Dot plot':
+
+                        clustering_keys = [col for col in adata.obs.columns if col.startswith("leiden") or col.startswith("louvain")]
+                        if clustering_keys:
+                            group = st.selectbox("Group by:", clustering_keys)
+                        else:
+                            st.warning("No clustering keys found in adata.obs.")
+                            group = None
+
+                        if st.button("Plot Gene Expression") and group is not None:
+                            n_genes = len(gene_names)
+                            n_cols = min(3, n_genes)
+                            n_rows = (n_genes + n_cols - 1) // n_cols
+                            
+                            fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
+                            axes = axes.flatten() if n_genes > 1 else [axes]
+                            
+                            for i, gene in enumerate(gene_names):
+                                ax = axes[i]
+                                sc.pl.dotplot(adata, var_names=gene, groupby=group, ax=ax, show=False, dendrogram=True)
+                                ax.set_title(gene)
+                            
+                            for j in range(i + 1, len(axes)):
+                                fig.delaxes(axes[j])  # remove empty subplots
+
+                            plt.tight_layout()
+                            st.pyplot(fig)
+                elif plot_type == 'Heatmap':
+                    clustering_keys = [col for col in adata.obs.columns if col.startswith("leiden") or col.startswith("louvain")]
+                    if clustering_keys:
+                        group = st.selectbox("Group by:", clustering_keys)
+                    else:
+                        st.warning("No clustering keys found in adata.obs.")
+                        group = None
+
+                    if st.button("Plot Gene Expression") and group is not None:
+                        n_genes = len(gene_names)
+                        width = 8  # Fixed width
+                        height = max(4, n_genes * 0.5 + 2)
+
+                        sc.pl.heatmap(adata, var_names=gene_names, groupby=group, dendrogram=True, show=False, figsize=(width, height), swap_axes=True)
+                        fig = plt.gcf()  # Get current figure
+                        st.pyplot(fig)
+                        plt.close(fig)
+                elif plot_type == 'Matrix plot':
+
+                    clustering_keys = [col for col in adata.obs.columns if col.startswith("leiden") or col.startswith("louvain")]
+                    if clustering_keys:
+                        group = st.selectbox("Group by:", clustering_keys)
+                    else:
+                        st.warning("No clustering keys found in adata.obs.")
+                        group = None
+
+                    if st.button("Plot Gene Expression") and group is not None:
+                        n_genes = len(gene_names)
+                        width = 8  # Fixed width
+                        height = max(4, n_genes * 0.5 + 2)
+
+                        sc.pl.matrixplot(adata, var_names=gene_names, groupby=group, dendrogram=True, show=False, figsize=(width, height), swap_axes=True)
+                        fig = plt.gcf()  # Get current figure
+                        st.pyplot(fig)
+                        plt.close(fig)
+                elif plot_type == 'Stacked violin plot':
+
+                    clustering_keys = [col for col in adata.obs.columns if col.startswith("leiden") or col.startswith("louvain")]
+                    if clustering_keys:
+                        group = st.selectbox("Group by:", clustering_keys)
+                    else:
+                        st.warning("No clustering keys found in adata.obs.")
+                        group = None
+
+                    if st.button("Plot Gene Expression") and group is not None:
+                        n_genes = len(gene_names)
+                        width = 8  # Fixed width
+                        height = max(4, n_genes * 0.5 + 2)
+
+                        sc.pl.stacked_violin(adata, var_names=gene_names, groupby=group, dendrogram=True, show=False, figsize=(width, height), swap_axes=True)
+                        fig = plt.gcf()  # Get current figure
+                        st.pyplot(fig)
+                        plt.close(fig)
+
+                else:
+                    st.warning("No valid gene names entered.")
+            
+        elif viz_type == "Cluster analysis":
+            st.subheader('Visualize clusters')
+
+            # Find clustering keys
+            cluster_keys = [col for col in adata.obs.columns if col.startswith("leiden") or col.startswith("louvain")]
+
+            # Ensure projection options are available
+            projection_options = [proj.replace('X_', '') for proj in adata.obsm.keys() if proj.startswith('X_')]
+            if not projection_options:
+                st.warning("No projection found in `adata.obsm` starting with 'X_'.")
+            else:
+                projection_type = st.selectbox('Projection type:', projection_options)
+
+                if not cluster_keys:
+                    st.warning("No cluster annotations found.")
+                else:
+                    cluster_key = st.selectbox("Select clustering key:", cluster_keys)
+                    if st.button("Plot Clusters"):
+                        fig, ax = plt.subplots(figsize=(8, 6))
+                        if projection_type.lower() == 'umap':
+                            sc.pl.umap(adata, color=cluster_key, ax=ax, frameon=False, show=False)
+                        elif projection_type.lower() == 'tsne':
+                            sc.pl.tsne(adata, color=cluster_key, ax=ax, frameon=False, show=False)
+                        elif projection_type.lower() == 'pca':
+                            sc.pl.pca(adata, color=cluster_key, ax=ax, frameon=False, show=False)
+                        else:
+                            st.warning(f"No plotting function defined for projection: {projection_type}")
+                        st.pyplot(fig)
+        
+        elif viz_type == 'Cell group annotations':
+            st.subheader("Visualize cell groups")
+
+            # Get all boolean columns from adata.obs
+            bool_cols = [col for col in adata.obs.columns if pd.api.types.is_bool_dtype(adata.obs[col]) or pd.api.types.is_categorical_dtype(adata.obs[col])]
+
+            if not bool_cols:
+                st.warning("No boolean annotations found in `adata.obs`. Please annotate cells first.")
+            else:
+                annotation_key = st.selectbox("Select annotation to visualize:", bool_cols)
+
+                # Get available projections from adata.obsm
+                projection_options = [proj.replace("X_", "") for proj in adata.obsm.keys() if proj.startswith("X_")]
+                if not projection_options:
+                    st.warning("No dimensionality reduction projections found (e.g., UMAP, tSNE in `adata.obsm`).")
+                else:
+                    projection_type = st.selectbox("Select projection type:", projection_options)
+
+                    if st.button("Plot Annotated Cells"):
+                        fig, ax = plt.subplots(figsize=(8, 6))
+
+                        if projection_type.lower() == "umap":
+                            sc.pl.umap(adata, color=annotation_key, ax=ax, frameon=False, show=False)
+                        elif projection_type.lower() == "tsne":
+                            sc.pl.tsne(adata, color=annotation_key, ax=ax, frameon=False, show=False)
+                        else:
+                            # Fallback to generic embedding
+                            embedding_key = f"X_{projection_type}"
+                            if embedding_key in adata.obsm:
+                                sc.pl.embedding(adata, basis=embedding_key.replace("X_", ""), color=annotation_key, ax=ax, frameon=False, show=False)
+                            else:
+                                st.error(f"Projection '{projection_type}' not found in `adata.obsm`.")
+
+                        st.pyplot(fig)
+
+        elif viz_type == "Quality metrics":
+            st.subheader('Visualize quality metrics')
+
+            # Filter for common QC metrics patterns in observations
+            qc_obs_patterns = ['n_genes', 'n_counts', 'total_counts', 'pct_counts', 'percent_', 'pct_', 'mt_', 'ribo_', 'hb_', 'doublet', 'scrublet']
+            qc_metrics_col = [col for col in adata.obs.columns 
+                            if any(pattern in col.lower() for pattern in qc_obs_patterns) 
+                            and not col.startswith(('leiden_', 'louvain_',)) 
+                            and 'highly_variable' not in col.lower()]
+            
+            # Filter for common QC metrics patterns in variables
+            qc_var_patterns = ['mean', 'std', 'var', 'cv', 'dropout', 'highly_variable', 'dispersions', 'pct_dropout']
+            qc_metrics_var = [col for col in adata.var.columns 
+                            if any(pattern in col.lower() for pattern in qc_var_patterns)]
+
+            all_qc_metrics = qc_metrics_col + qc_metrics_var
+
+            if not all_qc_metrics:
+                st.warning("No QC metrics found in the data.")
+
+            qc_genes = st.multiselect("Select QC metrics to visualize:", all_qc_metrics)
+
+            if qc_genes:
+                # Separate obs and var metrics
+                obs_metrics = [metric for metric in qc_genes if metric in adata.obs.columns]
+                var_metrics = [metric for metric in qc_genes if metric in adata.var.columns]
+                
+                # Plot observation metrics (if any)
+                if obs_metrics:
+                    st.write("**Cell-level QC Metrics (Observation Data):**")
+                    sc.pl.violin(
+                        adata,
+                        obs_metrics,
+                        jitter=0.4,
+                        multi_panel=True,
+                        show=False
+                    )
+                    fig = plt.gcf()
+                    st.pyplot(fig)
+                    plt.close(fig)
+        
+                # Plot variable metrics (if any)
+                if var_metrics:
+                    st.write("**Gene-level QC Metrics (Variable Data):**")
+                    for metric in var_metrics:
+                        # Create histogram for each variable metric
+                        fig, ax = plt.subplots(figsize=(8, 4))
+                        ax.hist(adata.var[metric].dropna(), bins=50, alpha=0.7, edgecolor='black')
+                        ax.set_xlabel(metric)
+                        ax.set_ylabel('Frequency')
+                        ax.set_title(f'Distribution of {metric}')
+                        ax.grid(True, alpha=0.3)
+                        st.pyplot(fig)
+                        plt.close(fig)
+
+elif mode == 'Advanced Analysis' and selected_step == 'Export Results':
+    st.subheader("Export AnnData Objects")
+
+    # Collect top-level AnnData objects
+    top_level_keys = {key: st.session_state[key] for key in st.session_state if isinstance(st.session_state[key], ad.AnnData)}
+
+    # Collect subset AnnData objects from st.session_state["saved_subsets"]
+    subset_dict = st.session_state.get("saved_subsets", {})
+    subset_keys = {f"subset_{key}": val for key, val in subset_dict.items() if isinstance(val, ad.AnnData)}
+
+    # Combine all into one dictionary
+    all_adata_dict = {**top_level_keys, **subset_keys}
+
+    if not all_adata_dict:
+        st.warning("No AnnData objects found in session state.")
+    else:
+        selected_keys = st.multiselect("Select AnnData objects to export:", list(all_adata_dict.keys()), default=list(all_adata_dict.keys()))
+
+        if selected_keys:
+            zip_buffer = io.BytesIO()
+
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+                for key in selected_keys:
+                    adata = all_adata_dict[key]
+
+                    with tempfile.NamedTemporaryFile(suffix=".h5ad", delete=False) as tmp_file:
+                        adata.write(tmp_file.name)
+                        with open(tmp_file.name, "rb") as f:
+                            zipf.writestr(f"{key}.h5ad", f.read())
+
+            zip_buffer.seek(0)
+
+            st.download_button(
+                label="Download selected .h5ad files as ZIP",
+                data=zip_buffer,
+                file_name="exported_adata_files.zip",
+                mime="application/zip"
+            )
+        else:
+            st.info("Please select at least one object to export.")
+
 
 
 
