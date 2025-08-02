@@ -1442,7 +1442,6 @@ elif mode == 'Advanced Analysis' and selected_step == 'Cell-level Manipulation':
                             st.success(f"Subset saved as `{subset_name}`.")
 
                             
-
         elif task == 'Re-analyze clusters':            
             # Get clustering keys (e.g., 'leiden', 'louvain')
             clustering_cols = [col for col in adata.obs.columns if col.startswith("leiden") or col.startswith("louvain")]
