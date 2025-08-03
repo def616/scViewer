@@ -34,7 +34,17 @@ docker build -t scviewer .
 ```bash
 docker run -p 8501:8501 scviewer
 ```
+### 3. Open the web tool
+Open your browser at http://localhost:8501 to use scViewer.
 
+---
+
+## No Docker
+If you prefer running locally without Docker:
+``` bash
+pip install -r requirements.txt
+streamlit run app.py
+```
 
 
 
