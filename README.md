@@ -1,7 +1,6 @@
-# scViewer: Interactive Single-Cell Data Visualization App
+# scViewer: Single cell data analysis made easy
 
-**scViewer** is a Streamlit-based web app for interactive analysis and visualization of single-cell RNA-seq data using Scanpy and AnnData.  
-It supports cell annotation, cluster visualization, and flexible export of processed data.
+**scViewer** is a Streamlit-based web tool for Scanpy-based analysis for single cell data. It supports standard pipeline for single cell data analysis from pre-processing to differential gene expression. It also supports advanced analysis that allows users to analyze their data catered to their questions.
 
 ---
 
