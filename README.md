@@ -6,9 +6,15 @@
 
 ## Features
 
-- Visualize clusters (UMAP, tSNE) with dynamic selection  
-- Annotate cells based on gene expression thresholds  
-- Visualize annotated boolean cell subsets  
+- Quality control, pre-processing, feature selection
+- Linear and non-linear dimensionality reduction
+- Leiden and Louvain clustering
+- Gene expression, clusters, and quality metrics visualization  
+- Subset and filter cells
+- Subset and filter cells based on gene expressions
+- Annotate cell groups based on gene expressions
+- Differential gene expression analysis
+- Co-expression analysis
 - Export AnnData objects and subsets for downstream use  
 
 ---
