@@ -6,16 +6,23 @@
 
 ## Features
 
-- Quality control, pre-processing, feature selection
-- Linear and non-linear dimensionality reduction
-- Leiden and Louvain clustering
-- Gene expression, clusters, and quality metrics visualization  
-- Subset and filter cells
-- Subset and filter cells based on gene expressions
-- Annotate cell groups based on gene expressions
-- Differential gene expression analysis
-- Co-expression analysis
-- Export AnnData objects and subsets for downstream use  
+- Input & output: single cell data in .h5ad format
+- Standard pipeline:
+  - Quality control, pre-processing, feature selection
+  - Linear and non-linear dimensionality reduction
+  - Leiden and Louvain clustering
+  - Gene expression, clusters, and quality metrics visualization
+  - Export Anndata results
+- Advanced pipeline:
+  - Cell-level manipulation
+    - Label clusters
+    - Subset and filter cells
+    - Subset and filter cells based on gene expressions
+    - Annotate cell groups
+  - Gene-level manipulation
+    - Differential gene expression analysis
+    - Co-expression analysis
+  - Export AnnData objects and subsets for downstream use
 
 ---
 
