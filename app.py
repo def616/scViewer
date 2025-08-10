@@ -16,6 +16,7 @@ import warnings
 import igraph
 import leidenalg
 import altair as alt
+from scipy.stats import median_abs_deviation
 warnings.filterwarnings('ignore')
 import matplotlib as mpl
 mpl.rcParams['figure.dpi'] = 80
@@ -64,15 +65,18 @@ if 'analysis_step' not in st.session_state:
     st.session_state.analysis_step = 0
 
 # Title
-st.markdown('<h1 class="main-header">scViewer: Single Cell Analysis Made Easy</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header">scViewer: Scanpy-based Single Cell Analysis Made Easy</h1>', unsafe_allow_html=True)
 
 # Sidebar for navigation
 mode = st.sidebar.radio("Choose mode:", ["Standard Pipeline", "Advanced Analysis"], key="mode_selector")
 # st.sidebar.title("Standard Analysis Pipeline")
 pipeline_steps = [
     "Data Loading",
-    "Quality Control",
-    "Pre-processing", 
+    "Pre-Quality Control Visualization",
+    'Basic Filtering',
+    'Outlier Detection',
+    'Doublet Detection',
+    'Post-Quality Control Visualization',
     "Normalization & Transformation",
     "Feature Selection",
     "Dimensionality Reduction",
@@ -151,8 +155,16 @@ def plot_qc_metrics(adata):
         axes[2,0].set_title('Ribosomal Gene %')
 
     if all(col in adata.obs.columns for col in ["total_counts", "n_genes_by_counts", "pct_counts_mt"]):
-        sc.pl.scatter(adata, x="total_counts", y="n_genes_by_counts", color="pct_counts_mt", ax=axes[2,1])
-        axes[2,1].set_title('Total Counts vs Genes (Colored by Mito %)')
+        ax = axes[2,1]
+        x = adata.obs["total_counts"]
+        y = adata.obs["n_genes_by_counts"]
+        c = adata.obs["pct_counts_mt"]
+
+        sc_plot = ax.scatter(x, y, c=c, cmap='viridis', s=10)
+        cbar = fig.colorbar(sc_plot, ax=ax)
+        cbar.set_label('pct_counts_mt')
+        ax.set_title('Total Counts vs Genes (Colored by Mito %)')
+
     
     plt.tight_layout()
     return fig
@@ -180,6 +192,13 @@ def plot_other_qc_metrics(adata, qc_source="obs", metric=None, plot_type="Violin
     ax.set_title(f"{plot_type} of `{metric}`")
     return fig
 
+def findOutliers(adata, metric, nmads):
+    M = adata.obs[metric]
+    outlier = (M < np.median(M) - nmads * median_abs_deviation(M)) | (
+            np.median(M) + nmads * median_abs_deviation(M) < M
+    )
+    return outlier
+
 
 # content based on selected step
 if mode == "Standard Pipeline" and selected_step == "Data Loading":
@@ -187,14 +206,14 @@ if mode == "Standard Pipeline" and selected_step == "Data Loading":
     
     st.markdown("""
     <div class="info-box">
-    <strong>What we're doing:</strong> Loading your single-cell RNA-seq data into an AnnData object.
+    <strong>What we're doing:</strong> Loading your single-cell RNA-seq data.
     Supported format: H5AD
     </div>
     """, unsafe_allow_html=True)
     
     # File upload
     uploaded_file = st.file_uploader(
-        "Upload your single-cell data file",
+        "Upload your single cell data file:",
         type=['h5ad']
     )
     
@@ -226,137 +245,651 @@ if mode == "Standard Pipeline" and selected_step == "Data Loading":
         except Exception as e:
             st.error(f"Error loading file: {str(e)}") 
 
-elif mode == "Standard Pipeline" and selected_step == "Quality Control":
+elif mode == "Standard Pipeline" and selected_step == "Pre-Quality Control Visualization":
     if st.session_state.adata is None:
-        st.warning("Please load data first!")
+        st.warning("Please load data first.")
     else:
-        st.markdown('<h2 class="step-header">Step 2: Quality Control</h2>', unsafe_allow_html=True)
-        
+        st.markdown('<h2 class="step-header">Step 2: Pre-Quality Control Visualization</h2>', unsafe_allow_html=True)
         st.markdown("""
         <div class="info-box">
-        <strong>What we're doing:</strong> Calculating quality control metrics. Scanpy's function, calculate_qc_metrics(), calculates common QC metrics. 
-                    We can input a specific gene population in order to calculate proportions of counts for this population. For example, we can calculate common QC metrics for mitochondrial, hemoglobin, and ribosomal genes.
-                    We also will predict doublet cells.
+        <strong>What we’re doing:</strong> This step calculates standard QC metrics, optionally annotates mitochondrial, hemoglobin, and ribosomal genes.
         </div>
         """, unsafe_allow_html=True)
-        
+
         adata = st.session_state.adata.copy()
-        
-        # Calculate QC metrics
+
         species = st.selectbox('Species', ['Mouse', 'Human'])
         mito_gene = st.checkbox('Annotate mitochondrial genes', value=True)
         hemo_gene = st.checkbox('Annotate hemoglobin genes', value=True)
         ribo_gene = st.checkbox('Annotate ribosomal genes', value=True)
 
-        qc_button = st.button("Calculate QC Metrics")
-
-        if qc_button:
-            with st.spinner("Calculating quality control metrics..."):
+        if st.button("Calculate QC Metrics"):
+            with st.spinner("Running QC..."):
                 adata.var_names_make_unique()
-
-                # Determine species-specific mitochondrial gene prefix
-                mito_prefix = 'mt-' if species == 'Mouse' else 'Mt-'
+                mito_prefix = 'mt-' if species == 'Mouse' else 'MT-'
                 adata.var['mt'] = adata.var_names.str.startswith(mito_prefix)
 
-                # Add optional QC gene markers
                 if ribo_gene:
                     adata.var["ribo"] = adata.var_names.str.startswith(("RPS", "RPL"))
                 if hemo_gene:
                     if species == 'Mouse':
                         adata.var["hb"] = adata.var_names.str.contains(r"^Hb[ab]")
-                    elif species == 'Human':
+                    else:
                         adata.var["hb"] = adata.var_names.str.contains(r"^HB[AB]")
 
-                # Build qc_vars list dynamically
                 qc_vars = ['mt']
-                if ribo_gene:
-                    qc_vars.append('ribo')
-                if hemo_gene:
-                    qc_vars.append('hb')
+                if ribo_gene: qc_vars.append('ribo')
+                if hemo_gene: qc_vars.append('hb')
 
-                # Run QC
                 sc.pp.calculate_qc_metrics(adata, qc_vars=qc_vars, log1p=True, inplace=True)
-
-                # Predict doublets
                 sc.pp.scrublet(adata, batch_key="sample")
 
-                # Store result
                 st.session_state.adata = adata
-                st.success("✅ QC metrics calculated!")
+                st.success("QC metrics calculated.")
 
+            # Define and show the highest expressed genes plot
+            def highest_expr_genes_plot(adata):
+                sc.pl.highest_expr_genes(adata, n_top=20, show=False)
+                fig = plt.gcf()  # get current figure generated by Scanpy
+                st.pyplot(fig)
 
-        # Display QC metrics if available
-        if 'total_counts' in adata.obs.columns:
-            st.subheader("Quality Control Metrics")
-            
-            # Plot QC metrics
-            fig = plot_qc_metrics(adata)
-            st.pyplot(fig)
+            # Define and show QC violin plots
+            def preQCplots(adata):
+                groupby = "sample" if "sample" in adata.obs.columns else None
+                
+                # Base metrics that are always present
+                base_metrics = ["total_counts", "n_genes_by_counts"]
+                
+                # Check which percentage metrics exist
+                pct_metrics = []
+                if 'pct_counts_mt' in adata.obs.columns:
+                    pct_metrics.append('pct_counts_mt')
+                if 'pct_counts_hb' in adata.obs.columns:
+                    pct_metrics.append('pct_counts_hb')
+                if 'pct_counts_ribo' in adata.obs.columns:
+                    pct_metrics.append('pct_counts_ribo')
+                
+                # Combine all available metrics
+                all_metrics = base_metrics + pct_metrics
+                num_metrics = len(all_metrics)
+                
+                if num_metrics < 3:
+                    # Only basic metrics (total_counts, n_genes_by_counts)
+                    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+                    
+                    # Total counts per cell
+                    sc.pl.violin(adata, ['total_counts'], groupby=groupby, ax=axes[0], jitter=0.4)
+                    axes[0].set_title('Total Counts per Cell')
+                    
+                    # Number of genes per cell
+                    sc.pl.violin(adata, ['n_genes_by_counts'], groupby=groupby, ax=axes[1], jitter=0.4)
+                    axes[1].set_title('Number of Genes per Cell')
+                    
+                elif num_metrics == 3:
+                    # Basic metrics + one percentage metric
+                    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+                    
+                    # Total counts per cell
+                    sc.pl.violin(adata, ['total_counts'], groupby=groupby, ax=axes[0], jitter=0.4)
+                    axes[0].set_title('Total Counts per Cell')
+                    
+                    # Number of genes per cell
+                    sc.pl.violin(adata, ['n_genes_by_counts'], groupby=groupby, ax=axes[1], jitter=0.4)
+                    axes[1].set_title('Number of Genes per Cell')
+                    
+                    # The one available percentage metric
+                    pct_metric = pct_metrics[0]
+                    sc.pl.violin(adata, [pct_metric], groupby=groupby, ax=axes[2], jitter=0.4)
+                    
+                    # Set appropriate title based on which metric it is
+                    if pct_metric == 'pct_counts_mt':
+                        axes[2].set_title('Mitochondrial Gene %')
+                    elif pct_metric == 'pct_counts_hb':
+                        axes[2].set_title('Hemoglobin Gene %')
+                    elif pct_metric == 'pct_counts_ribo':
+                        axes[2].set_title('Ribosomal Gene %')
+                    
+                else:  # num_metrics > 3
+                    # Basic metrics + multiple percentage metrics
+                    # Create a grid that can accommodate all metrics
+                    if num_metrics <= 4:
+                        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+                        axes = axes.flatten()
+                    else:  # num_metrics == 5
+                        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+                        axes = axes.flatten()
+                    
+                    # Plot basic metrics
+                    sc.pl.violin(adata, ['total_counts'], groupby=groupby, ax=axes[0], jitter=0.4)
+                    axes[0].set_title('Total Counts per Cell')
+                    
+                    sc.pl.violin(adata, ['n_genes_by_counts'], groupby=groupby, ax=axes[1], jitter=0.4)
+                    axes[1].set_title('Number of Genes per Cell')
+                    
+                    # Plot percentage metrics
+                    for i, pct_metric in enumerate(pct_metrics, start=2):
+                        sc.pl.violin(adata, [pct_metric], groupby=groupby, ax=axes[i], jitter=0.4)
+                        
+                        if pct_metric == 'pct_counts_mt':
+                            axes[i].set_title('Mitochondrial Gene %')
+                        elif pct_metric == 'pct_counts_hb':
+                            axes[i].set_title('Hemoglobin Gene %')
+                        elif pct_metric == 'pct_counts_ribo':
+                            axes[i].set_title('Ribosomal Gene %')
+                    
+                    # Hide unused subplots if any
+                    for j in range(num_metrics, len(axes)):
+                        axes[j].set_visible(False)
+                
+                plt.tight_layout()
+                return fig
 
-            # columns for viewing .obs and .var
-            col1, col2 = st.columns(2)
+            # Render both plots if metrics are available
+            if "n_genes_by_counts" in adata.obs.columns:
+                st.subheader("Top 20 Highest Expressed Genes")
+                highest_expr_genes_plot(adata)
 
-            with col1:
-                st.subheader('Cell-level info (.obs)')
-                df = adata.obs.head(20).copy()
-                for col in df.select_dtypes(include=bool).columns:
-                    df[col] = df[col].astype(str)
-                st.dataframe(df)
-            
-            with col2:
-                st.subheader('Gene-level info (.var)')
-                df = adata.var.head(20).copy()
-                for col in df.select_dtypes(include=bool).columns:
-                    df[col] = df[col].astype(str)
-                st.dataframe(df)
+                st.subheader("Violin Plots of QC Metrics")
+                st.pyplot(preQCplots(adata))
+            else:
+                st.info("Please calculate QC metrics first to view the plots.")
 
-elif mode == "Standard Pipeline" and selected_step == "Pre-processing":
+elif mode == 'Standard Pipeline' and selected_step == 'Basic Filtering':
     if st.session_state.adata is None:
-        st.warning("Please load data first!")
+        st.warning("Please load data first.")
     else:
-        st.markdown('<h2 class="step-header">Step 3: Pre-processing</h2>', unsafe_allow_html=True)
-        
+        st.markdown('<h2 class="step-header">Step 3: Basic Filtering </h2>', unsafe_allow_html=True)
         st.markdown("""
         <div class="info-box">
-        <strong>What we're doing:</strong> Filtering out low-quality cells and genes based on QC metrics.
-        This step removes cells and genes that don't meet our quality thresholds.
+        <strong>What we’re doing:</strong> This step filters the desired minimum cell and genes.
+        </div>
+        """, unsafe_allow_html=True)
+
+        adata = st.session_state.adata.copy()
+
+        # filtering
+        st.subheader("Filtering Based on Counts")
+        col1, col2 = st.columns(2)
+        with col1:
+            min_genes = st.number_input("Min genes per cell", min_value=0, value=200)
+        with col2:
+            min_cells = st.number_input("Min cells per gene", min_value=0, value=3)
+
+        if st.button("Apply Filtering"):
+            with st.spinner("Filtering cells and genes..."):
+                n_cells_before = adata.n_obs
+                n_genes_before = adata.n_vars
+
+                sc.pp.filter_cells(adata, min_genes=min_genes)
+                sc.pp.filter_genes(adata, min_cells=min_cells)
+
+                st.success("Filtering complete.")
+                st.info(f"Cells: {n_cells_before} → {adata.n_obs}")
+                st.info(f"Genes: {n_genes_before} → {adata.n_vars}")
+
+                st.session_state.adata = adata
+                st.subheader("Filtered Dataset Summary")
+                display_data_summary(adata)
+
+
+elif mode == 'Standard Pipeline' and selected_step == 'Outlier Detection':
+    if st.session_state.adata is None:
+        st.warning("Please load data first.")
+    else:
+        st.markdown('<h2 class="step-header">Step 4: Outlier Detection </h2>', unsafe_allow_html=True)
+        st.markdown("""
+        <div class="info-box">
+        <strong>What we’re doing:</strong> Identify and remove cells with unusual QC metrics (e.g., high mitochondrial content or extreme counts) 
+                    using three methods. Three methods can be used to detect outliers - MAD: flags values far from the median, percentile: flags values outside set data percentiles, and manual: uses fixed cutoff values based on biological knowledge.
+        """, unsafe_allow_html=True)
+
+        adata = st.session_state.adata.copy()
+
+        # detect outliers
+        def set_outliers(df, column, method="MAD", side="both", mad_thresh=3, lower_pct=1, upper_pct=99, manual_range=None):
+            x = df[column].values
+
+            if method == "MAD":
+                median = np.median(x)
+                mad = np.median(np.abs(x - median))
+                if mad == 0:
+                    mad = 1e-9
+                z_mad = np.abs(x - median) / mad
+                mask = z_mad > mad_thresh
+
+            elif method == "percentile":
+                lower_cut = np.percentile(x, lower_pct)
+                upper_cut = np.percentile(x, upper_pct)
+                mask = (x < lower_cut) | (x > upper_cut)
+
+            elif method == "manual":
+                if manual_range is None:
+                    raise ValueError("manual_range must be provided for method='manual'")
+                lower_cut, upper_cut = manual_range
+                mask = (x < lower_cut) | (x > upper_cut)
+
+            else:
+                raise ValueError("method must be 'MAD', 'percentile', or 'manual'")
+
+            # Adjust for side
+            if side == "upper":
+                mask = x > (upper_cut if method == "percentile" else (np.median(x) + mad_thresh * mad if method == "MAD" else manual_range[1]))
+            elif side == "lower":
+                mask = x < (lower_cut if method == "percentile" else (np.median(x) - mad_thresh * mad if method == "MAD" else manual_range[0]))
+
+            return pd.Series(mask, index=df.index)
+
+        # metrics
+        possible_metrics = [
+            "pct_counts_mt",
+            "pct_counts_hb",
+            "pct_counts_ribo",
+            "log1p_total_counts",
+            "log1p_n_genes_by_counts",
+            "pct_counts_in_top_20_genes"
+        ]
+        available_metrics = [m for m in possible_metrics if m in adata.obs.columns]
+
+        selected_metrics = st.multiselect("Select QC metrics for outlier detection:", available_metrics)
+
+        all_outliers = pd.DataFrame(index=adata.obs.index)
+
+        for metric in selected_metrics:
+            st.subheader(f"Settings for {metric}")
+            method = st.selectbox(f"Method for {metric}:", ["MAD", "percentile", "manual"], key=f"method_{metric}")
+
+            if method == "MAD":
+                mad_thresh = st.number_input(f"MAD threshold for {metric}:", value=3.0, min_value=0.1)
+                mask = set_outliers(adata.obs, metric, method="MAD", mad_thresh=mad_thresh)
+
+            elif method == "percentile":
+                lower_pct = st.number_input(f"Lower percentile for {metric}:", value=1.0, min_value=0.0, max_value=100.0)
+                upper_pct = st.number_input(f"Upper percentile for {metric}:", value=99.0, min_value=0.0, max_value=100.0)
+                mask = set_outliers(adata.obs, metric, method="percentile", lower_pct=lower_pct, upper_pct=upper_pct)
+
+            elif method == "manual":
+                lower_cut = st.number_input(f"Manual lower cutoff for {metric}:", value=0.0)
+                upper_cut = st.number_input(f"Manual upper cutoff for {metric}:", value=float(adata.obs[metric].max()))
+                mask = set_outliers(adata.obs, metric, method="manual", manual_range=(lower_cut, upper_cut))
+
+            all_outliers[metric] = mask
+
+            # viz
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.hist(adata.obs.loc[~mask, metric], bins=50, alpha=0.6, label="Inliers")
+            ax.hist(adata.obs.loc[mask, metric], bins=50, alpha=0.6, label="Outliers", color="red")
+            ax.set_title(f"Outlier detection for {metric}")
+            ax.set_xlabel(metric)
+            ax.set_ylabel("Count")
+            ax.legend()
+            st.pyplot(fig)
+
+        # combine outliers
+        if not all_outliers.empty:
+            any_outlier = all_outliers.any(axis=1)
+            st.write(f"Total cells flagged as outliers: {any_outlier.sum()} / {len(any_outlier)}")
+
+            if st.checkbox("Remove outliers from dataset"):
+                adata = adata[~any_outlier].copy()
+                st.session_state.adata = adata
+                st.success(f"Outliers removed and dataset updated. The filtered dataset contains **{len(adata.obs)}** cells and **{len(adata.var)}** genes.")
+                
+
+elif mode == "Standard Pipeline" and selected_step == 'Doublet Detection':
+    if st.session_state.adata is None:
+        st.warning("Please load data first.")
+    else:
+        st.markdown('<h2 class="step-header">Step 5: Doublet Detection </h2>', unsafe_allow_html=True)
+        st.markdown("""
+        <div class="info-box">
+        <strong>What we're doing:</strong> Detect and remove doublet cells based on gene expression profiles.
         </div>
         """, unsafe_allow_html=True)
         
         adata = st.session_state.adata.copy()
         
-        if 'total_counts' not in adata.obs.columns:
-            st.warning("Please calculate QC metrics first!")
-        else:
-            # Filtering parameters
-            st.subheader("Filtering Parameters")
-            col1, col2 = st.columns(2)
+        if 'doublet_detected' not in st.session_state:
+            st.session_state.doublet_detected = False
+        
+        # Initialize scrublet_inst in session state to persist threshold
+        if 'scrublet_inst' not in st.session_state:
+            st.session_state.scrublet_inst = None
             
-            with col1:
-                min_genes = st.number_input("Min genes per cell", min_value=0, value=200)
+        expected_doublet_rate = st.slider("Expected doublet rate (%)", 0.0, 20.0, 7.5, 0.1)
+        
+        if st.button('Detect doublet cells'):
+            with st.spinner('Detecting doublets...'):
+                counts_matrix = adata.X.copy()
+                if hasattr(counts_matrix, "toarray"):
+                    counts_matrix = counts_matrix.toarray()
+                
+                scrublet_inst = scr.Scrublet(counts_matrix, expected_doublet_rate=expected_doublet_rate / 100)
+                doublet_scores, predicted_doublets = scrublet_inst.scrub_doublets()
+                
+                adata.obs["doublet_score"] = doublet_scores
+                adata.obs["predicted_doublet"] = predicted_doublets
+                
+                # Store both the adata and scrublet instance
+                st.session_state.adata = adata
+                st.session_state.scrublet_inst = scrublet_inst
+                st.session_state.doublet_detected = True
+        
+        if st.session_state.doublet_detected and st.session_state.scrublet_inst is not None:
+            adata = st.session_state.adata
             
-            with col2:
-                min_cells = st.number_input("Min cells per gene", min_value=0, value=3)
+            # histogram
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.hist(adata.obs["doublet_score"], bins=50, alpha=0.7, color='dodgerblue')
+            ax.axvline(st.session_state.scrublet_inst.threshold_, color='red', linestyle='--', 
+                      label=f'Threshold = {st.session_state.scrublet_inst.threshold_:.3f}')
+            ax.set_xlabel('Doublet Score')
+            ax.set_ylabel('Cell Count')
+            ax.set_title('Doublet Score Distribution')
+            ax.legend()
+            st.pyplot(fig)
             
-            if st.button("Apply Filtering"):
-                with st.spinner("Filtering cells and genes..."):
-                    n_cells_before = adata.n_obs
-                    n_genes_before = adata.n_vars
-                    
-                    # Filter cells
-                    sc.pp.filter_cells(adata, min_genes=min_genes)
-                    sc.pp.filter_genes(adata, min_cells=min_cells)
-                    
-                    # Store filtered data
-                    st.session_state.adata = adata
-                    
-                    st.success(f"✅ Filtering complete!")
-                    st.info(f"Cells: {n_cells_before} → {adata.n_obs} ({n_cells_before - adata.n_obs} removed)")
-                    st.info(f"Genes: {n_genes_before} → {adata.n_vars} ({n_genes_before - adata.n_vars} removed)")
-                    
-                    # Display updated summary
-                    st.subheader("Filtered Dataset Summary")
-                    display_data_summary(adata)
+            doublet_count = adata.obs['predicted_doublet'].sum()
+            st.write(f"Predicted doublets: {doublet_count} / {adata.n_obs} cells ({doublet_count/adata.n_obs*100:.1f}%)")
+            
+            if st.checkbox("Remove predicted doublets from dataset"):
+                adata_filtered = adata[~adata.obs["predicted_doublet"]].copy()
+                st.session_state.adata = adata_filtered
+                st.success(f"Doublets removed. Dataset now has {adata_filtered.n_obs} cells and {adata_filtered.n_vars} genes.")
+                
+                # Reset doublet detection state since data changed
+                st.session_state.doublet_detected = False
+                st.session_state.scrublet_inst = None
+
+                # show .obs
+                st.subheader('Cell-level info (.obs)')
+                df = adata.obs.head(20).copy()
+                for col in df.select_dtypes(include=bool).columns:
+                    df[col] = df[col].astype(str)
+                st.dataframe(df)
+
+
+elif mode == "Standard Pipeline" and selected_step == "Post-Quality Control Visualization":
+    if st.session_state.adata is None:
+        st.warning("Please load data first.")
+    else:
+        st.markdown('<h2 class="step-header">Step 6: Post-Quality Control Visualization </h2>', unsafe_allow_html=True)
+        st.markdown("""
+        <div class="info-box">
+        <strong>What we’re doing:</strong> Visualize QC metrics post-filtering.
+        </div>
+        """, unsafe_allow_html=True)
+
+        adata = st.session_state.adata.copy()
+
+        if st.button('Visualize post-QC metrics'):
+            def postQCplots(adata):
+                groupby = "sample" if "sample" in adata.obs.columns else None
+                
+                # Base metrics that are always present
+                base_metrics = ["total_counts", "n_genes_by_counts"]
+                
+                # Check which percentage metrics exist
+                pct_metrics = []
+                if 'pct_counts_mt' in adata.obs.columns:
+                    pct_metrics.append('pct_counts_mt')
+                if 'pct_counts_hb' in adata.obs.columns:
+                    pct_metrics.append('pct_counts_hb')
+                if 'pct_counts_ribo' in adata.obs.columns:
+                    pct_metrics.append('pct_counts_ribo')
+                
+                # Check if doublet detection results exist
+                has_doublet_results = 'doublet_score' in adata.obs.columns and 'predicted_doublet' in adata.obs.columns
+                
+                # Combine all available metrics
+                all_metrics = base_metrics + pct_metrics
+                num_metrics = len(all_metrics)
+                
+                # Adjust layout based on whether we have doublet results
+                if has_doublet_results:
+                    # Add doublet histogram as a separate subplot
+                    if num_metrics < 3:
+                        # Only basic metrics + doublet plot
+                        fig = plt.figure(figsize=(15, 5))
+                        gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 1])
+                        
+                        # Total counts per cell
+                        ax1 = fig.add_subplot(gs[0, 0])
+                        sc.pl.violin(adata, ['total_counts'], groupby=groupby, ax=ax1, jitter=0.4)
+                        ax1.set_title('Total Counts per Cell')
+                        
+                        # Number of genes per cell
+                        ax2 = fig.add_subplot(gs[0, 1])
+                        sc.pl.violin(adata, ['n_genes_by_counts'], groupby=groupby, ax=ax2, jitter=0.4)
+                        ax2.set_title('Number of Genes per Cell')
+                        
+                        # Doublet score histogram
+                        ax3 = fig.add_subplot(gs[0, 2])
+                        ax3.hist(adata.obs["doublet_score"], bins=50, alpha=0.7, color='lightblue', label='All cells')
+                        doublet_scores = adata.obs.loc[adata.obs["predicted_doublet"], "doublet_score"]
+                        ax3.hist(doublet_scores, bins=50, alpha=0.8, color='red', label='Predicted doublets')
+                        ax3.set_xlabel('Doublet Score')
+                        ax3.set_ylabel('Cell Count')
+                        ax3.set_title('Doublet Score Distribution')
+                        ax3.legend()
+                        ax3.grid(True, alpha=0.3)
+                        
+                    elif num_metrics == 3:
+                        # Basic metrics + one percentage metric + doublet plot
+                        fig = plt.figure(figsize=(20, 5))
+                        gs = fig.add_gridspec(1, 4, width_ratios=[1, 1, 1, 1])
+                        
+                        # Total counts per cell
+                        ax1 = fig.add_subplot(gs[0, 0])
+                        sc.pl.violin(adata, ['total_counts'], groupby=groupby, ax=ax1, jitter=0.4)
+                        ax1.set_title('Total Counts per Cell')
+                        
+                        # Number of genes per cell
+                        ax2 = fig.add_subplot(gs[0, 1])
+                        sc.pl.violin(adata, ['n_genes_by_counts'], groupby=groupby, ax=ax2, jitter=0.4)
+                        ax2.set_title('Number of Genes per Cell')
+                        
+                        # The one available percentage metric
+                        ax3 = fig.add_subplot(gs[0, 2])
+                        pct_metric = pct_metrics[0]
+                        sc.pl.violin(adata, [pct_metric], groupby=groupby, ax=ax3, jitter=0.4)
+                        
+                        # Set appropriate title based on which metric it is
+                        if pct_metric == 'pct_counts_mt':
+                            ax3.set_title('Mitochondrial Gene %')
+                        elif pct_metric == 'pct_counts_hb':
+                            ax3.set_title('Hemoglobin Gene %')
+                        elif pct_metric == 'pct_counts_ribo':
+                            ax3.set_title('Ribosomal Gene %')
+                        
+                        # Doublet score histogram
+                        ax4 = fig.add_subplot(gs[0, 3])
+                        ax4.hist(adata.obs["doublet_score"], bins=50, alpha=0.7, color='lightblue', label='All cells')
+                        doublet_scores = adata.obs.loc[adata.obs["predicted_doublet"], "doublet_score"]
+                        ax4.hist(doublet_scores, bins=50, alpha=0.8, color='red', label='Predicted doublets')
+                        ax4.set_xlabel('Doublet Score')
+                        ax4.set_ylabel('Cell Count')
+                        ax4.set_title('Doublet Score Distribution')
+                        ax4.legend()
+                        ax4.grid(True, alpha=0.3)
+                        
+                    else:  # num_metrics > 3
+                        # Basic metrics + multiple percentage metrics + doublet plot
+                        # Create a grid that can accommodate all metrics + doublet plot
+                        if num_metrics <= 4:
+                            fig = plt.figure(figsize=(15, 10))
+                            gs = fig.add_gridspec(2, 3, height_ratios=[1, 1])
+                            
+                            # First row: basic metrics + first pct metric
+                            ax1 = fig.add_subplot(gs[0, 0])
+                            sc.pl.violin(adata, ['total_counts'], groupby=groupby, ax=ax1, jitter=0.4)
+                            ax1.set_title('Total Counts per Cell')
+                            
+                            ax2 = fig.add_subplot(gs[0, 1])
+                            sc.pl.violin(adata, ['n_genes_by_counts'], groupby=groupby, ax=ax2, jitter=0.4)
+                            ax2.set_title('Number of Genes per Cell')
+                            
+                            ax3 = fig.add_subplot(gs[0, 2])
+                            pct_metric = pct_metrics[0]
+                            sc.pl.violin(adata, [pct_metric], groupby=groupby, ax=ax3, jitter=0.4)
+                            if pct_metric == 'pct_counts_mt':
+                                ax3.set_title('Mitochondrial Gene %')
+                            elif pct_metric == 'pct_counts_hb':
+                                ax3.set_title('Hemoglobin Gene %')
+                            elif pct_metric == 'pct_counts_ribo':
+                                ax3.set_title('Ribosomal Gene %')
+                            
+                            # Second row: remaining pct metrics + doublet plot
+                            current_col = 0
+                            for i, pct_metric in enumerate(pct_metrics[1:], start=1):
+                                ax = fig.add_subplot(gs[1, current_col])
+                                sc.pl.violin(adata, [pct_metric], groupby=groupby, ax=ax, jitter=0.4)
+                                
+                                if pct_metric == 'pct_counts_mt':
+                                    ax.set_title('Mitochondrial Gene %')
+                                elif pct_metric == 'pct_counts_hb':
+                                    ax.set_title('Hemoglobin Gene %')
+                                elif pct_metric == 'pct_counts_ribo':
+                                    ax.set_title('Ribosomal Gene %')
+                                
+                                current_col += 1
+                            
+                            # Doublet plot in the last available position
+                            ax_doublet = fig.add_subplot(gs[1, current_col])
+                            ax_doublet.hist(adata.obs["doublet_score"], bins=50, alpha=0.7, color='lightblue', label='All cells')
+                            doublet_scores = adata.obs.loc[adata.obs["predicted_doublet"], "doublet_score"]
+                            ax_doublet.hist(doublet_scores, bins=50, alpha=0.8, color='red', label='Predicted doublets')
+                            ax_doublet.set_xlabel('Doublet Score')
+                            ax_doublet.set_ylabel('Cell Count')
+                            ax_doublet.set_title('Doublet Score Distribution')
+                            ax_doublet.legend()
+                            ax_doublet.grid(True, alpha=0.3)
+                            
+                        else:  # num_metrics == 5
+                            fig = plt.figure(figsize=(18, 10))
+                            gs = fig.add_gridspec(2, 3)
+                            
+                            # First row
+                            ax1 = fig.add_subplot(gs[0, 0])
+                            sc.pl.violin(adata, ['total_counts'], groupby=groupby, ax=ax1, jitter=0.4)
+                            ax1.set_title('Total Counts per Cell')
+                            
+                            ax2 = fig.add_subplot(gs[0, 1])
+                            sc.pl.violin(adata, ['n_genes_by_counts'], groupby=groupby, ax=ax2, jitter=0.4)
+                            ax2.set_title('Number of Genes per Cell')
+                            
+                            ax3 = fig.add_subplot(gs[0, 2])
+                            pct_metric = pct_metrics[0]
+                            sc.pl.violin(adata, [pct_metric], groupby=groupby, ax=ax3, jitter=0.4)
+                            if pct_metric == 'pct_counts_mt':
+                                ax3.set_title('Mitochondrial Gene %')
+                            elif pct_metric == 'pct_counts_hb':
+                                ax3.set_title('Hemoglobin Gene %')
+                            elif pct_metric == 'pct_counts_ribo':
+                                ax3.set_title('Ribosomal Gene %')
+                            
+                            # Second row
+                            current_col = 0
+                            for i, pct_metric in enumerate(pct_metrics[1:], start=1):
+                                if current_col < 2:  # Leave space for doublet plot
+                                    ax = fig.add_subplot(gs[1, current_col])
+                                    sc.pl.violin(adata, [pct_metric], groupby=groupby, ax=ax, jitter=0.4)
+                                    
+                                    if pct_metric == 'pct_counts_mt':
+                                        ax.set_title('Mitochondrial Gene %')
+                                    elif pct_metric == 'pct_counts_hb':
+                                        ax.set_title('Hemoglobin Gene %')
+                                    elif pct_metric == 'pct_counts_ribo':
+                                        ax.set_title('Ribosomal Gene %')
+                                    
+                                    current_col += 1
+                            
+                            # Doublet plot
+                            ax_doublet = fig.add_subplot(gs[1, 2])
+                            ax_doublet.hist(adata.obs["doublet_score"], bins=50, alpha=0.7, color='lightblue', label='All cells')
+                            doublet_scores = adata.obs.loc[adata.obs["predicted_doublet"], "doublet_score"]
+                            ax_doublet.hist(doublet_scores, bins=50, alpha=0.8, color='red', label='Predicted doublets')
+                            ax_doublet.set_xlabel('Doublet Score')
+                            ax_doublet.set_ylabel('Cell Count')
+                            ax_doublet.set_title('Doublet Score Distribution')
+                            ax_doublet.legend()
+                            ax_doublet.grid(True, alpha=0.3)
+                
+                else:
+                    # Original layout without doublet results
+                    if num_metrics < 3:
+                        # Only basic metrics (total_counts, n_genes_by_counts)
+                        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+                        
+                        # Total counts per cell
+                        sc.pl.violin(adata, ['total_counts'], groupby=groupby, ax=axes[0], jitter=0.4)
+                        axes[0].set_title('Total Counts per Cell')
+                        
+                        # Number of genes per cell
+                        sc.pl.violin(adata, ['n_genes_by_counts'], groupby=groupby, ax=axes[1], jitter=0.4)
+                        axes[1].set_title('Number of Genes per Cell')
+                        
+                    elif num_metrics == 3:
+                        # Basic metrics + one percentage metric
+                        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+                        
+                        # Total counts per cell
+                        sc.pl.violin(adata, ['total_counts'], groupby=groupby, ax=axes[0], jitter=0.4)
+                        axes[0].set_title('Total Counts per Cell')
+                        
+                        # Number of genes per cell
+                        sc.pl.violin(adata, ['n_genes_by_counts'], groupby=groupby, ax=axes[1], jitter=0.4)
+                        axes[1].set_title('Number of Genes per Cell')
+                        
+                        # The one available percentage metric
+                        pct_metric = pct_metrics[0]
+                        sc.pl.violin(adata, [pct_metric], groupby=groupby, ax=axes[2], jitter=0.4)
+                        
+                        # Set appropriate title based on which metric it is
+                        if pct_metric == 'pct_counts_mt':
+                            axes[2].set_title('Mitochondrial Gene %')
+                        elif pct_metric == 'pct_counts_hb':
+                            axes[2].set_title('Hemoglobin Gene %')
+                        elif pct_metric == 'pct_counts_ribo':
+                            axes[2].set_title('Ribosomal Gene %')
+                        
+                    else:  # num_metrics > 3
+                        # Basic metrics + multiple percentage metrics
+                        # Create a grid that can accommodate all metrics
+                        if num_metrics <= 4:
+                            fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+                            axes = axes.flatten()
+                        else:  # num_metrics == 5
+                            fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+                            axes = axes.flatten()
+                        
+                        # Plot basic metrics
+                        sc.pl.violin(adata, ['total_counts'], groupby=groupby, ax=axes[0], jitter=0.4)
+                        axes[0].set_title('Total Counts per Cell')
+                        
+                        sc.pl.violin(adata, ['n_genes_by_counts'], groupby=groupby, ax=axes[1], jitter=0.4)
+                        axes[1].set_title('Number of Genes per Cell')
+                        
+                        # Plot percentage metrics
+                        for i, pct_metric in enumerate(pct_metrics, start=2):
+                            sc.pl.violin(adata, [pct_metric], groupby=groupby, ax=axes[i], jitter=0.4)
+                            
+                            if pct_metric == 'pct_counts_mt':
+                                axes[i].set_title('Mitochondrial Gene %')
+                            elif pct_metric == 'pct_counts_hb':
+                                axes[i].set_title('Hemoglobin Gene %')
+                            elif pct_metric == 'pct_counts_ribo':
+                                axes[i].set_title('Ribosomal Gene %')
+                        
+                        # Hide unused subplots if any
+                        for j in range(num_metrics, len(axes)):
+                            axes[j].set_visible(False)
+                
+                plt.tight_layout()
+                return fig
+
+            st.subheader("Violin Plots of QC Metrics")
+            st.pyplot(postQCplots(adata))
+
 
 elif mode == "Standard Pipeline" and selected_step == "Normalization & Transformation":
     if st.session_state.adata is None:
@@ -366,8 +899,8 @@ elif mode == "Standard Pipeline" and selected_step == "Normalization & Transform
         
         st.markdown("""
         <div class="info-box">
-        <strong>What we're doing:</strong> Normalizing gene expression data to a scale factor. Scanpy applies median count depth normalization with log1p transformation. 
-                    In this step, Scanpy also removes effects of sequencing depth via the function regress_out(). It also centers each gene to a mean of zero and scales each gene to unit variance.
+        <strong>What we're doing:</strong>  Gene expression is normalized to account for sequencing depth differences by scaling counts and applying a log transformation. Technical 
+                    variability is then removed, and each gene is standardized to zero mean and unit variance for downstream analysis.
         </div>
         """, unsafe_allow_html=True)
         
@@ -516,7 +1049,7 @@ elif mode == "Standard Pipeline" and selected_step == "Dimensionality Reduction"
         
         st.markdown("""
         <div class="info-box">
-        <strong>What we're doing:</strong> Reducing the dimensionality of the data using PCA and UMAP/t-SNE.
+        <strong>What we're doing:</strong> Reducing the dimensionality of the data using linear (PCA) and non-linear (UMAP/t-SNE) methods.
         This helps visualize the data and identify cell populations.
         </div>
         """, unsafe_allow_html=True)
@@ -548,7 +1081,7 @@ elif mode == "Standard Pipeline" and selected_step == "Dimensionality Reduction"
                     # Store results
                     st.session_state.adata = adata
                     
-                    st.success("✅ PCA complete!")
+                    st.success("PCA complete!")
                     
             # plotting pca
             if 'X_pca' in adata.obsm:
@@ -571,7 +1104,7 @@ elif mode == "Standard Pipeline" and selected_step == "Dimensionality Reduction"
             
         # UMAP/t-SNE parameters
         if 'X_pca' in adata.obsm:
-            st.subheader("Non-linear Dimensionality Reduction")
+            st.subheader("Non-linear Dimensionality Reduction (UMAP/t-SNE)")
             
             embedding_method = st.selectbox("Choose method:", ["UMAP", "t-SNE"])
             
@@ -593,7 +1126,7 @@ elif mode == "Standard Pipeline" and selected_step == "Dimensionality Reduction"
                         # Store results
                         st.session_state.adata = adata
                         
-                        st.success("✅ UMAP complete!")
+                        st.success("UMAP complete!")
                         
                         # Plot UMAP
                         col = st.columns(1)[0]
@@ -618,7 +1151,7 @@ elif mode == "Standard Pipeline" and selected_step == "Dimensionality Reduction"
                         # Store results
                         st.session_state.adata = adata
                         
-                        st.success("✅ t-SNE complete!")
+                        st.success("t-SNE complete!")
                         
                         # Plot t-SNE
                         fig, ax = plt.subplots(figsize=(8, 6))
@@ -657,9 +1190,15 @@ elif mode == "Standard Pipeline" and selected_step == "Clustering":
         
         adata = st.session_state.adata.copy()
         
-        # Check if neighborhood graph exists
-        if 'neighbors' not in adata.uns:
-            st.warning("Please run PCA and compute neighborhood graph first!")
+        # Check for clustering prerequisites
+        has_neighbors = 'neighbors' in adata.uns
+        has_embedding = any(key in adata.obsm for key in ['X_umap', 'X_tsne'])
+
+        if not has_neighbors:
+            st.warning("Missing neighborhood graph. Please run PCA and compute neighbors (required for Leiden/Louvain).")
+        elif not has_embedding:
+            st.warning("No embedding (UMAP or t-SNE) found. You may still cluster, but plots won't be generated.")
+
         else:
             # Clustering parameters
             st.subheader("Clustering Parameters")
@@ -688,7 +1227,7 @@ elif mode == "Standard Pipeline" and selected_step == "Clustering":
                     st.session_state.adata = adata
                     
                     n_clusters = len(adata.obs[cluster_key].unique())
-                    st.success(f"✅ {clustering_method} clustering complete! Identified {n_clusters} clusters.")
+                    st.success(f"{clustering_method} clustering complete! Identified {n_clusters} clusters.")
                     
                     # Plot clustering results
                     if 'X_umap' in adata.obsm:
