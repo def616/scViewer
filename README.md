@@ -1,4 +1,4 @@
-# scViewer: Single cell data analysis made easy
+# scViewer: Scanpy-based Single Cell Analysis Made Easy
 
 **scViewer** is a Streamlit-based app for Scanpy-based analysis of single cell data. It supports the standard pipeline for single cell data analysis from pre-processing to differential gene expression. It also supports advanced analysis that allows users to analyze their data catered to their questions.
 
