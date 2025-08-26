@@ -2,7 +2,7 @@
 
 **scViewer** is an app that makes Scanpy-based analysis of single cell data easy and accessible. It supports the standard pipeline for single cell data analysis from pre-processing to differential gene expression. It also supports advanced analysis that allows users to analyze their data catered to their questions.
 
-It is available via docker deployment, and also as a .pkg file under Releases for those who don't want to code!
+It is available via docker deployment, and also as a .pkg file under Releases for those who don't want to code! If download the .pkg file, make sure to click "Open Anyway" under macOS Privary & Security settings.
 
 ---
 
